@@ -2,7 +2,13 @@ import { GoogleGenAI } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
-const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+const apiKey = process.env.GEMINI_API_KEY;
+
+if (!apiKey) {
+  throw new Error("GEMINI_API_KEY is not configured");
+}
+
+const client = new GoogleGenAI({ apiKey });
 
 const ScanResultSchema = z.object({
   isVegetableOrFruit: z.boolean(),
@@ -17,7 +23,25 @@ const ScanResultSchema = z.object({
 
 export async function POST(req: NextRequest) {
   try {
-    const { imageBase64, mimeType } = await req.json();
+    const body = await req.json();
+
+    const { imageBase64, mimeType } = body;
+
+    // Validate image data
+    if (typeof imageBase64 !== "string" || !imageBase64) {
+      return NextResponse.json(
+        { error: "Image data is required" },
+        { status: 400 }
+      );
+    }
+
+    // Validate MIME type
+    if (typeof mimeType !== "string" || !mimeType) {
+      return NextResponse.json(
+        { error: "Image MIME type is required" },
+        { status: 400 }
+      );
+    }
 
     const prompt = `You are a produce inspection assistant. Look at this image carefully.
 
@@ -34,8 +58,15 @@ If the image is NOT a vegetable or fruit, set isVegetableOrFruit to false, fresh
     const interaction = await client.interactions.create({
       model: "gemini-3.6-flash",
       input: [
-        { type: "text", text: prompt },
-        { type: "image", data: imageBase64, mime_type: mimeType },
+        {
+          type: "text",
+          text: prompt,
+        },
+        {
+          type: "image",
+          data: imageBase64,
+          mime_type: mimeType,
+        },
       ],
       response_format: {
         type: "text",
@@ -44,13 +75,35 @@ If the image is NOT a vegetable or fruit, set isVegetableOrFruit to false, fresh
       },
     });
 
-    const parsed = ScanResultSchema.parse(JSON.parse(interaction.output_text));
-    return NextResponse.json(parsed);
-  } catch (err: any) {
-    console.error(err);
-    if (err?.status === 429) {
-      return NextResponse.json({ error: "Rate limited" }, { status: 429 });
+    // Make sure Gemini returned text
+    if (!interaction.output_text) {
+      throw new Error("Gemini returned empty output");
     }
-    return NextResponse.json({ error: "Could not analyze image" }, { status: 500 });
+
+    // Parse and validate Gemini response
+    const parsed = ScanResultSchema.parse(
+      JSON.parse(interaction.output_text)
+    );
+
+    return NextResponse.json(parsed);
+  } catch (err: unknown) {
+    console.error("Scan API error:", err);
+
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "status" in err &&
+      (err as { status?: number }).status === 429
+    ) {
+      return NextResponse.json(
+        { error: "Rate limited" },
+        { status: 429 }
+      );
+    }
+
+    return NextResponse.json(
+      { error: "Could not analyze image" },
+      { status: 500 }
+    );
   }
 }
